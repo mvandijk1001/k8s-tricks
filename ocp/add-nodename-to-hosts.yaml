@@ -1,0 +1,95 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: sa-add-nodename-to-hosts
+  namespace: foo
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: rb-add-nodename-to-hosts
+  namespace: foo
+subjects:
+  - kind: ServiceAccount
+    name: sa-add-nodename-to-hosts
+    namespace: foo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: add-nodename-to-hosts
+  namespace: foo
+spec:
+  selector:
+    matchLabels:
+      app: add-nodename-to-hosts
+  template:
+    metadata:
+      labels:
+        app: add-nodename-to-hosts
+    spec:
+      serviceAccountName: sa-add-nodename-to-hosts
+      nodeSelector:
+        node-role.kubernetes.io/worker: ''
+      containers:
+        - name: alpine
+          command:
+            - sh
+            - '-c'
+            - trap 'exit 255' SIGTERM; while true; do sh /scripts/add-nodename-to-hosts.sh; sleep 60; done
+          volumeMounts:
+            - name: etchosts
+              mountPath: /etc/hosts
+            - name: scripts
+              mountPath: /scripts
+          image: alpine:latest
+          securityContext:
+            # needed to mount /etc/hosts
+            privileged: true
+          env:
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+      volumes:
+        - name: etchosts
+          hostPath:
+            path: /etc/hosts
+        - name: scripts
+          configMap:
+            name: script-add-nodename-to-hosts
+            defaultMode: 360
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: script-add-nodename-to-hosts
+  namespace: foo
+data:
+  add-nodename-to-hosts.sh: |
+    #!/bin/sh
+
+    set -e
+
+    if [ -z $NODENAME ]; then
+      echo "Env var NODENAME not set!"
+      exit 1
+    fi
+
+    LOOPBACK4=127.0.0.1
+    LOOPBACK6=::1
+    HOSTSFILE=/etc/hosts
+    HOSTSTMP=/tmp/hosts
+
+    for ADDR in "$LOOPBACK4" "$LOOPBACK6"; do
+      if ! grep -qe "^$ADDR.*$NODENAME" $HOSTSFILE; then
+        echo "Adding $ADDR $NODENAME"
+        sed "s/^\($ADDR.*\)$/\1 $NODENAME/" $HOSTSFILE > $HOSTSTMP
+        # need to shell output to file instead of inplace edit to avoid changing inode
+        cat $HOSTSTMP > $HOSTSFILE
+      fi
+    done
