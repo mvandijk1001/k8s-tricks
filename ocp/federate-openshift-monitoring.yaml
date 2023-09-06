@@ -1,0 +1,111 @@
+# Everything needed to have the openshift-user-workload-monitoring prometheus
+# scrape the openshift-monitoring prometheus's federate endpoint.
+# 
+# This was needed in an environment where the ocp cluster was provided by
+# another team, and openshift-monitoring was managed by that team.
+# openshift-user-workload-monitoring was enabled but unmanaged. There were
+# requirements for some of the metrics collected by openshift-monitoring to be
+# exported via remote-write. Therefore what was needed was remote-write enabled
+# on the openshift-user-workload-monitoring prometheus, and also the
+# openshift-user-workload-monitoring prometheus needed to scrape the
+# openshift-monitoring federate endpoint to collect the desired metrics.
+
+# RBAC: need a SA with cluster-monitoring-view role, whose token will be used
+# when querying openshift-monitoring prometheus
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: sa-federate-openshift-monitoring
+  namespace: my-monitoring
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sa-federate-openshift-monitoring-token
+  namespace: my-monitoring
+  annotations:
+    kubernetes.io/service-account.name: sa-federate-openshift-monitoring
+type: kubernetes.io/service-account-token
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: crb-federate-openshift-monitoring
+  namespace: my-monitoring
+subjects:
+  - kind: ServiceAccount
+    name: sa-federate-openshift-monitoring
+    namespace: my-monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+---
+
+# ServiceMonitor for external service (external service being the Route of
+# openshift-monitoring prometheus federate). Service defines the domain target,
+# Endpoints is what prometheus service discovery find (and that maps to the
+# service with the same name), then ServiceMonitor ensures the address is
+# correct
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    endpoint: openshift-monitoring-prometheus-k8s
+  name: openshift-monitoring-prometheus-k8s
+  namespace: my-monitoring
+spec:
+  type: ExternalName
+  externalName: prometheus-k8s-federate-openshift-monitoring.my.ocp.routes.com
+  ports:
+  - name: metrics
+    port: 443
+    protocol: TCP
+    targetPort: 443
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  labels:
+    endpoint: openshift-monitoring-prometheus-k8s
+  name: openshift-monitoring-prometheus-k8s
+  namespace: my-monitoring
+subsets:
+- addresses:
+  - ip: 1.2.3.4
+  ports:
+  - name: metrics
+    port: 443
+    protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    endpoint: openshift-monitoring-prometheus-k8s
+  name: openshift-monitoring-prometheus-k8s
+  namespace: my-monitoring
+spec:
+  selector:
+    matchLabels:
+      endpoint: openshift-monitoring-prometheus-k8s
+  endpoints:
+  - path: /federate
+    bearerTokenSecret:
+      name: sa-federate-openshift-monitoring-token
+      key: token
+    port: metrics
+    scheme: https
+    relabelings:
+    - sourceLabels: [__address__]
+      targetLabel: __address__
+      regex: (.*)
+      replacement: "prometheus-k8s-federate-openshift-monitoring.my.ocp.routes.com:443"
+      action: replace
+    tlsConfig:
+      insecureSkipVerify: true
+    params:
+      match[]:
+      - 'up'
+      - 'ALERTS'
+      # add more queries here
